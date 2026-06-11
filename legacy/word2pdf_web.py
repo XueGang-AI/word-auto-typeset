@@ -21,6 +21,7 @@ from convert_word_to_pdf import (
     reorder_files_by_list,
     sanitize_pdf_name,
 )
+from format_with_template import format_document
 
 PAGE_CSS = """
 :root{
@@ -128,6 +129,8 @@ def sanitize_zip_name(name: str) -> str:
 
 
 def safe_upload_name(name: str) -> str:
+    if isinstance(name, bytes):
+        name = name.decode("utf-8", errors="replace")
     name = name.replace("\\", "/").split("/")[-1].strip()
     name = name or "upload"
     return name
@@ -204,6 +207,25 @@ def convert_batch_with_docker(src_dir: Path, raw_out: Path, image: str) -> None:
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or "Docker 转换失败")
+
+
+def format_job(template_data: bytes, template_name: str, content_data: bytes, content_name: str) -> bytes:
+    """格式对齐任务：模板+内容 → 格式化后的 Word 文档。"""
+    with tempfile.TemporaryDirectory(prefix="word2pdf_format_") as td:
+        root = Path(td)
+        template_path = root / safe_upload_name(template_name)
+        content_path = root / safe_upload_name(content_name)
+        template_path.write_bytes(template_data)
+        content_path.write_bytes(content_data)
+
+        output_path = root / f"{content_path.stem}_格式对齐.docx"
+
+        stats = format_document(template_path, content_path, output_path)
+
+        if not output_path.exists():
+            raise RuntimeError("格式对齐失败，未生成输出文件")
+
+        return output_path.read_bytes(), stats
 
 
 def build_zip(final_dir: Path, zip_path: Path, extra_files: list[tuple[str, Path]] | None = None) -> None:
@@ -335,7 +357,16 @@ def convert_job(uploaded_files: list[tuple[str, bytes]], target_names: list[str]
         return zip_path.read_bytes()
 
 
-def render_page(message: str = "", error: str = "", backend: str = "") -> str:
+def render_page(message: str = "", error: str = "", backend: str = "", format_stats: dict | None = None) -> str:
+    format_msg = ""
+    if format_stats:
+        lines = [
+            f"格式对齐完成！原段落 {format_stats['total_original']} → 删除空行 {format_stats['empty_removed']}",
+            f"主标题 {format_stats.get('main_title', 0)} | 章节标题 {format_stats.get('article_title', 0)} | 层级标题 {format_stats.get('section_header', 0)}",
+            f"作者 {format_stats.get('author_name', 0)} | 正文 {format_stats.get('body_text', 0)} | 标签 {format_stats.get('tag_label', 0)} | 单位 {format_stats.get('affiliation', 0)} | 图片 {format_stats.get('image', 0)}",
+        ]
+        format_msg = "<div class='result' style='border-color:#b5e8c3;background:#f7fff9'><span class='tag' style='background:rgba(28,185,74,.08);color:#1b9928'>格式对齐完成</span><div style='margin-top:10px;white-space:pre-wrap;font-size:14px;line-height:1.8'>" + "<br>".join(html.escape(l) for l in lines) + "</div></div>"
+
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -350,11 +381,11 @@ def render_page(message: str = "", error: str = "", backend: str = "") -> str:
       <div class="brand">
         <div class="kicker">Local Batch Converter</div>
         <h1>Word 批量转 PDF</h1>
-        <div class="sub">一次上传多份 Word，粘贴多行目标名字，点击后在本机完成批量转换并下载 ZIP。适合 20 份、200 份这种批处理场景。</div>
+        <div class="sub">两步走：① 上传模板 + 内容文档 → 格式对齐；② 上传 Word + 粘贴命名 → 批量转 PDF 下载 ZIP。</div>
         <div class="pillrow">
+          <span class="pill">格式对齐</span>
           <span class="pill">支持 .doc / .docx</span>
           <span class="pill">批量重命名</span>
-          <span class="pill">本地运行</span>
           <span class="pill">结果打包下载</span>
         </div>
       </div>
@@ -364,47 +395,77 @@ def render_page(message: str = "", error: str = "", backend: str = "") -> str:
           <div>{html.escape(backend or backend_description())}</div>
         </div>
         <div class="note" style="margin:0">
-          建议：目标名字一行一个；如果你担心文件顺序错位，就把“源文件顺序”也填上。
+          <strong>流程：</strong>先做格式对齐（得到格式化 Word）→ 再做批量转 PDF 并命名。
         </div>
       </div>
     </div>
 
+    {format_msg}
     {"<div class='result'><span class='tag'>提示</span><div style='margin-top:10px'>" + html.escape(message) + "</div></div>" if message else ""}
     {"<div class='result' style='border-color:#e8b5b5;background:#fff7f7'><span class='tag' style='background:rgba(185,28,28,.08);color:#991b1b'>错误</span><div style='margin-top:10px;white-space:pre-wrap'>" + html.escape(error) + "</div></div>" if error else ""}
 
-    <form class="grid" action="/convert" method="post" enctype="multipart/form-data">
-      <div class="panel">
-        <label>上传 Word 文件（可多选）</label>
-        <input type="file" name="files" multiple accept=".doc,.docx,.DOC,.DOCX" />
-        <div class="small">选中全部 Word 文件后直接提交。文件会按“源文件顺序”或自然排序依次对应名字列表。</div>
+    <!-- 格式对齐 -->
+    <div class="panel" style="margin-bottom:18px">
+      <div class="kicker" style="margin-bottom:4px">步骤一</div>
+      <h2 style="margin:0 0 16px;font-size:22px">格式对齐（模板 → 内容）</h2>
+      <form action="/format" method="post" enctype="multipart/form-data">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+          <div>
+            <label>上传模板文档（定义目标格式）</label>
+            <input type="file" name="template" accept=".docx,.doc" required />
+            <div class="small">模板决定字体、字号、缩进、行距等格式。可随时替换模板。</div>
+          </div>
+          <div>
+            <label>上传内容文档（待格式化的 Word）</label>
+            <input type="file" name="content" accept=".docx,.doc" required />
+            <div class="small">内容保持原样，格式对齐到模板。</div>
+          </div>
+        </div>
+        <div class="row" style="margin-top:16px">
+          <button type="submit">开始格式对齐</button>
+          <span class="small" style="margin:0">输出：格式对齐后的 .docx 文件</span>
+        </div>
+      </form>
+    </div>
 
-        <div style="height:16px"></div>
-        <label>目标名字列表</label>
-        <textarea name="names" placeholder="h1wh202605001&#10;h1wh202605002&#10;h1wh202605003" required></textarea>
-        <div class="small">一行一个名字，不要带 <code>.pdf</code> 也可以，程序会自动补上。</div>
-      </div>
+    <!-- 批量转 PDF -->
+    <div class="panel">
+      <div class="kicker" style="margin-bottom:4px">步骤二</div>
+      <h2 style="margin:0 0 16px;font-size:22px">批量转 PDF + 命名</h2>
+      <form class="grid" action="/convert" method="post" enctype="multipart/form-data">
+        <div class="panel" style="box-shadow:none;border:none;padding:0">
+          <label>上传 Word 文件（可多选）</label>
+          <input type="file" name="files" multiple accept=".doc,.docx,.DOC,.DOCX" />
+          <div class="small">选中全部 Word 文件后直接提交。文件会按"源文件顺序"或自然排序依次对应名字列表。</div>
 
-      <div class="panel">
-        <label>源文件顺序（可选，但强烈建议 200 份时填写）</label>
-        <textarea name="order" placeholder="1.docx&#10;2.docx&#10;3.docx"></textarea>
-        <div class="small">一行一个源文件名或文件主名，用来精确控制与名字列表的对应关系。</div>
-
-        <div style="height:16px"></div>
-        <label>下载文件名</label>
-        <input type="text" name="zip_name" value="word2pdf_result.zip" />
-
-        <div class="row">
-          <label class="check"><input type="checkbox" name="overwrite" checked />允许覆盖同名目标</label>
+          <div style="height:16px"></div>
+          <label>目标名字列表</label>
+          <textarea name="names" placeholder="h1wh202605001&#10;h1wh202605002&#10;h1wh202605003" required></textarea>
+          <div class="small">一行一个名字，不要带 <code>.pdf</code> 也可以，程序会自动补上。</div>
         </div>
 
-        <div class="row" style="margin-top:18px">
-          <button type="submit">开始批量转换</button>
+        <div class="panel" style="box-shadow:none;border:none;padding:0">
+          <label>源文件顺序（可选，但强烈建议 200 份时填写）</label>
+          <textarea name="order" placeholder="1.docx&#10;2.docx&#10;3.docx"></textarea>
+          <div class="small">一行一个源文件名或文件主名，用来精确控制与名字列表的对应关系。</div>
+
+          <div style="height:16px"></div>
+          <label>下载文件名</label>
+          <input type="text" name="zip_name" value="word2pdf_result.zip" />
+
+          <div class="row">
+            <label class="check"><input type="checkbox" name="overwrite" checked />允许覆盖同名目标</label>
+          </div>
+
+          <div class="row" style="margin-top:18px">
+            <button type="submit">开始批量转换</button>
+          </div>
         </div>
-      </div>
-    </form>
+      </form>
+    </div>
 
     <div class="note">
-      使用方式很简单：上传 Word、粘贴名字、点按钮。若文件顺序不稳定，就把源文件顺序也贴上。
+      使用方式很简单：先格式对齐、再批量转 PDF。若文件顺序不稳定，就把源文件顺序也贴上。
     </div>
   </div>
 </body>
@@ -432,10 +493,64 @@ class Word2PDFHandler(BaseHTTPRequestHandler):
         self._send_html(render_page(backend=self.server.backend_desc))
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path != "/convert":
+        if self.path == "/format":
+            self._handle_format()
+        elif self.path == "/convert":
+            self._handle_convert()
+        else:
             self.send_error(HTTPStatus.NOT_FOUND)
+
+    def _handle_format(self) -> None:
+        """处理格式对齐请求：模板 + 内容 → 格式化后的 Word。"""
+        ctype, _ = cgi.parse_header(self.headers.get("content-type", ""))
+        if ctype != "multipart/form-data":
+            self._send_html(render_page(error="请使用网页表单上传文件。", backend=self.server.backend_desc), status=400)
             return
 
+        env = {
+            "REQUEST_METHOD": "POST",
+            "CONTENT_TYPE": self.headers.get("content-type", ""),
+        }
+        if "content-length" in self.headers:
+            env["CONTENT_LENGTH"] = self.headers["content-length"]
+
+        try:
+            form = cgi.FieldStorage(fp=self.rfile, headers=self.headers, environ=env, keep_blank_values=True)
+
+            template_files = extract_uploaded_files(form, "template")
+            if not template_files:
+                raise ValueError("请上传模板文档。")
+            template_name, template_data = template_files[0]
+
+            content_files = extract_uploaded_files(form, "content")
+            if not content_files:
+                raise ValueError("请上传内容文档。")
+            content_name, content_data = content_files[0]
+
+            payload, stats = format_job(template_data, template_name, content_data, content_name)
+
+            safe_content_name = safe_upload_name(content_name)
+            output_name = Path(safe_content_name).stem + "_格式对齐.docx"
+            # HTTP header 只支持 ASCII，中文文件名需 URL 编码
+            from urllib.parse import quote
+            output_name_encoded = quote(output_name)
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+            self.send_header("Content-Disposition", f"attachment; filename=\"{output_name_encoded}\"; filename*=UTF-8''{output_name_encoded}")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            self._send_html(
+                render_page(error=f"{exc}", backend=self.server.backend_desc),
+                status=400,
+            )
+
+    def _handle_convert(self) -> None:
+        """处理批量转换请求：Word → PDF ZIP。"""
         ctype, _ = cgi.parse_header(self.headers.get("content-type", ""))
         if ctype != "multipart/form-data":
             self._send_html(render_page(error="请使用网页表单上传文件。", backend=self.server.backend_desc), status=400)

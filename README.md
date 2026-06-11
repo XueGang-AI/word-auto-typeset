@@ -1,189 +1,162 @@
-# Word2PDF 批量转换工具
+# Word 自动套版系统
 
-批量将 `.doc` / `.docx` 转换为 `.pdf`，支持多种重命名模式，自带本地网页界面。
+## 项目概述
 
-## 功能特性
+基于 FastAPI + Vue3 的 Word 文档自动排版系统，支持：
 
-- **真实格式转换**：调用 LibreOffice 进行转换，不是简单改后缀
-- **三种重命名模式**：保留原名 / 映射表命名 / 顺序名单命名
-- **源文件顺序控制**：可显式指定文件对应关系，避免错位
-- **本地网页版**：浏览器操作，适合发给不会用命令行的朋友
-- **跨平台**：Windows / macOS / Linux 均可使用
-
-## 快速开始
-
-### 1. 安装依赖
-
-- Python 3.10+
-- [LibreOffice](https://www.libreoffice.org/)（确保 `soffice` 命令可用）
-
-```bash
-# macOS
-brew install libreoffice
-
-# Ubuntu/Debian
-sudo apt install libreoffice
-
-# Windows：下载安装 LibreOffice，或使用便携版
-```
-
-如果 `soffice` 不在 PATH 中，用 `--soffice-bin` 指定路径。
-
-### 2. 基本用法
-
-```bash
-# 保持原文件名，仅转换格式
-python convert_word_to_pdf.py --input-dir ./word文件 --output-dir ./pdf输出
-
-# 递归处理子目录
-python convert_word_to_pdf.py --input-dir ./word文件 --output-dir ./pdf输出 --recursive
-```
-
-## 命令行详细用法
-
-### 模式一：保留原名（`--rename-mode keep`）
-
-转换后的 PDF 保持原 Word 文件的主文件名：
-
-```bash
-python convert_word_to_pdf.py \
-  --input-dir ./word文件 \
-  --output-dir ./pdf输出 \
-  --rename-mode keep
-```
-
-输入 `报告.docx` → 输出 `报告.pdf`
-
-### 模式二：映射表命名（`--rename-mode map`）
-
-准备一个 CSV 文件，两列 `source,target`：
-
-```csv
-source,target
-报告.docx,2024年度报告
-合同.docx,项目合同-终版
-```
-
-```bash
-python convert_word_to_pdf.py \
-  --input-dir ./word文件 \
-  --output-dir ./pdf输出 \
-  --rename-mode map \
-  --mapping-file mapping.csv
-```
-
-> `source` 列支持带后缀（`报告.docx`）或不带后缀（`报告`），自动匹配。
-
-### 模式三：顺序名单命名（`--rename-mode list`）
-
-准备一个名字列表，每行一个目标名（不带 `.pdf`）：
-
-```txt
-合同-001
-合同-002
-合同-003
-```
-
-```bash
-python convert_word_to_pdf.py \
-  --input-dir ./word文件 \
-  --output-dir ./pdf输出 \
-  --rename-mode list \
-  --name-list-file name_list.txt
-```
-
-程序会按文件名自然排序后依次对应名单。
-
-### 指定源文件顺序（避免错位）
-
-当文件数量多时，强烈建议额外提供 `files_order.txt` 明确指定对应关系：
-
-```txt
-001.docx
-002.doc
-003
-```
-
-```bash
-python convert_word_to_pdf.py \
-  --input-dir ./word文件 \
-  --output-dir ./pdf输出 \
-  --rename-mode list \
-  --name-list-file name_list.txt \
-  --files-order-file files_order.txt
-```
-
-> `name_list.txt` 和 `files_order.txt` 行数必须一致，且源文件必须存在，否则报错停止。
-
-## 完整参数列表
-
-| 参数 | 说明 |
-|------|------|
-| `--input-dir` | Word 文件所在目录（必填） |
-| `--output-dir` | PDF 输出目录（默认同 input-dir） |
-| `--recursive` | 递归扫描子目录 |
-| `--rename-mode` | 重命名模式：`keep` / `map` / `list` |
-| `--mapping-file` | 映射表文件（配合 `map` 模式） |
-| `--name-list-file` | 名字列表文件（配合 `list` 模式） |
-| `--files-order-file` | 源文件顺序清单（配合 `list` 模式） |
-| `--soffice-bin` | LibreOffice 可执行文件路径 |
-| `--overwrite` | 覆盖已存在的同名 PDF |
-
-## 本地网页版
-
-提供一个浏览器界面，适合发给不太会用命令行的朋友。
-
-### 启动
-
-```bash
-# Windows：双击 start_web.bat
-# 或手动运行：
-python word2pdf_web.py
-```
-
-浏览器会自动打开 `http://localhost:8000`。
-
-### 功能
-
-- 一次上传多个 Word 文件
-- 粘贴多行目标名字
-- 可选填"源文件顺序"以确保一一对应
-- 点击开始，完成后自动下载 ZIP 包
-
-### 打包为 EXE 交付
-
-```bash
-# 1. 将便携版 LibreOffice 解压到 runtime/libreoffice/
-# 2. 运行打包脚本
-build_windows_exe.bat
-# 3. 将 dist_release/ 目录发给对方，双击即可使用
-```
+1. **模板管理** — 上传模板 Word → 自动分析样式（14种样式配置）→ 保存 `template_config.json`
+2. **AI 内容识别** — 纯 LLM 路线，调用 OpenAI 兼容 API（DeepSeek/OpenAI/豆包），17种段落类型分类（标题、作者、正文、来源等）。无规则回退，未配置时会拒绝运行。
+3. **自动套版渲染** — 模板样式 + AI 识别结果 → 生成排版后的 Word（保留图片、表格）
+4. **批量处理** — 多文件并发处理，输出 ZIP + report.xlsx
+5. **Word 转 PDF** — 批量 Word → PDF 转换（LibreOffice）
 
 ## 项目结构
 
 ```
-.
-├── convert_word_to_pdf.py      # 命令行主程序
-├── word2pdf_web.py             # 本地网页版
-├── build_windows_exe.bat       # Windows EXE 打包脚本
-├── start_web.bat               # 网页版启动脚本
-├── convert_in_container.sh     # Docker 容器转换脚本
-├── mapping_example.csv         # 映射表模板
-├── name_list_example.txt       # 名字列表模板
-├── files_order_example.txt     # 源文件顺序模板
-└── README.md
+word-auto-typeset/
+├── app/                              # FastAPI 后端
+│   ├── main.py                       # 应用入口，路由注册，静态文件挂载
+│   ├── config.py                     # 配置管理（AI、路径、并发、LibreOffice）
+│   ├── routers/
+│   │   ├── template.py               # 模板 CRUD API
+│   │   ├── typeset.py                # 单文件/批量套版 API
+│   │   └── convert.py                # Word → PDF 转换 API
+│   ├── services/
+│   │   ├── template_service.py       # 模板分析引擎（评分制样式提取）
+│   │   ├── content_parser.py         # 内容解析（段落、图片、表格）
+│   │   ├── ai_recognizer.py          # AI 结构识别（纯 LLM 路线）
+│   │   ├── renderer.py               # Word 渲染引擎（样式套用 + 图片嵌入）
+│   │   └── batch_service.py          # 批量任务调度
+│   ├── schemas/
+│   │   └── models.py                 # Pydantic 数据模型
+│   └── utils/
+│       ├── word_utils.py             # Word 工具函数
+│       └── file_utils.py             # 文件处理工具
+├── frontend/                         # Vue3 + Element Plus + Vite
+│   └── src/views/
+│       ├── TemplateManage.vue        # 模板管理
+│       ├── SingleTypeset.vue         # 单文件套版
+│       ├── BatchTypeset.vue          # 批量套版
+│       └── WordToPDF.vue             # Word 转 PDF
+├── legacy/                           # 原始脚本（保留兼容）
+├── requirements.txt
+└── start.sh                          # 一键启动脚本
 ```
 
-## 常见问题
+## 快速开始
 
-**Q: 转换失败怎么办？**
-检查 LibreOffice 是否正确安装，运行 `soffice --version` 确认。
+### 环境要求
 
-**Q: 文件顺序不对？**
-使用 `--files-order-file` 显式指定源文件顺序，而不是依赖自动排序。
+- Python 3.10+（macOS 需 `/opt/homebrew/bin/python3.11`）
+- Node.js 18+（前端开发）
+- LibreOffice（Word → PDF 功能）
 
-**Q: 如何给不会用命令行的朋友用？**
-打包成 EXE + 便携 LibreOffice，对方双击 `start_web.bat` 即可。
+### 一键启动
+
+```bash
+./start.sh
+```
+
+### 手动启动
+
+```bash
+# 安装依赖
+pip install -r requirements.txt
+cd frontend && npm install && npm run build && cd ..
+
+# 启动服务
+python3.11 -m uvicorn app.main:app --host 0.0.0.0 --port 8765
+```
+
+### 开发模式
+
+```bash
+# 终端 1 - 后端（自动重载）
+python3.11 -m uvicorn app.main:app --host 0.0.0.0 --port 8765 --reload
+
+# 终端 2 - 前端（热更新）
+cd frontend && npm run dev
+```
+
+打开浏览器：
+- 前端：`http://localhost:5173`
+- API 文档：`http://localhost:8765/api/docs`
+
+## API 端点
+
+### 模板管理 `/api/templates`
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/` | 列出所有模板 |
+| POST | `/upload` | 上传并分析模板 |
+| PUT | `/{id}/replace` | 替换模板文件 |
+| DELETE | `/{id}` | 删除模板 |
+| GET | `/{id}/config` | 查看模板配置 |
+| PUT | `/{id}/config` | 更新模板配置 |
+
+### 套版 `/api/typeset`
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/single/download` | 单文件套版并下载 |
+| POST | `/analyze` | 仅分析结构（预览） |
+| POST | `/batch` | 创建批量任务 |
+| GET | `/batch/{id}/progress` | 查询批量进度 |
+| GET | `/batch/{id}/download/zip` | 下载结果 ZIP |
+| GET | `/batch/{id}/download/report` | 下载处理报告 |
+
+### 转换 `/api/convert`
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/word-to-pdf` | Word 批量转 PDF |
+
+## AI 结构识别
+
+### 纯 LLM 路线（必需配置）
+
+所有段落分类由云端 LLM 完成，未配置时 `recognize_structure` 直接抛错，无规则回退。
+
+```bash
+export AI_ENABLED=true
+export AI_API_KEY=sk-xxx
+export AI_BASE_URL=https://api.deepseek.com   # 或 https://api.openai.com/v1 等
+export AI_MODEL=deepseek-chat                  # 或 gpt-4o-mini 等
+```
+
+系统 Prompt 内嵌 10 条 few-shot 示例（文本 + 字号/粗体/颜色/居中/字体/缩进 → 类型），并使用 `response_format: json_object` 强制 JSON 输出。Post-process 仅保证 `main_title` 不变量。
+
+## 核心流水线
+
+```
+模板 .docx → 分析样式 → TemplateConfig（14个样式配置 + 页面设置）
+内容 .docx → 解析段落/图片/表格 → AI识别结构 → ContentDocument
+                                            └→ 渲染引擎 → 输出 .docx
+```
+
+- 模板分析采用**评分制**：每种格式模式对每种段落类型打分，取最高分匹配
+- 图片通过 `w:drawing` 元素提取原始字节和尺寸，渲染时用 `add_picture()` 嵌入
+- 正文保留原始 `run` 级别的粗体（用于书名、关键词强调）
+
+## 环境变量
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `AI_ENABLED` | `false` | 启用 AI 识别 |
+| `AI_API_KEY` | — | API Key |
+| `AI_BASE_URL` | `https://api.openai.com/v1` | API 地址 |
+| `AI_MODEL` | `gpt-4o-mini` | 模型名称 |
+| `WORD2PDF_SOFFICE` | — | LibreOffice 路径 |
+| `MAX_CONCURRENT_TASKS` | `4` | 批量并发数 |
+| `BATCH_OUTPUT_MAX_AGE_HOURS` | `24` | 启动时清理超过此时长的批量输出目录 |
+| `HOST` / `PORT` | `0.0.0.0` / `8765` | 服务地址 |
+
+## 兼容旧版
+
+原始 CLI 工具保留在 `legacy/` 目录：
+```bash
+python legacy/word2pdf_web.py
+python legacy/convert_word_to_pdf.py --input-dir ./docs --output-dir ./pdf
+python legacy/format_with_template.py --template t.docx --content c.docx
+```
 
 ## License
 
