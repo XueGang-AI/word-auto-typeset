@@ -31,6 +31,7 @@ from app.schemas.models import (
 from app.services.content_parser import parse_content
 from app.services.ai_recognizer import recognize_structure
 from app.services.renderer import render_document
+from app.services.template_service import build_style_brief
 from app.utils.file_utils import safe_filename
 
 logger = logging.getLogger(__name__)
@@ -207,7 +208,10 @@ def _process_single_file(
 
         # ── Step 2: AI structure recognition ──
         log_entries.append(f"[{datetime.now().isoformat()}] 开始AI结构识别")
-        content_doc = recognize_structure(paragraphs, task.original_filename)
+        style_brief = build_style_brief(template_config)
+        content_doc = recognize_structure(
+            paragraphs, task.original_filename, style_brief=style_brief,
+        )
         log_entries.append(f"[{datetime.now().isoformat()}] AI识别完成")
 
         # Save content.json

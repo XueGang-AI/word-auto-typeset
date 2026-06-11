@@ -39,6 +39,12 @@ content_doc = recognize_structure(paragraphs, 'content.docx')
 render_document(content_doc, config, Path('output.docx'), Path('template.docx'))
 "
 
+# Batch-learning test: read all .docx from a directory as templates,
+# aggregate, then process a second directory and dump a comparison report
+# against ground-truth files in the templates directory.
+python3.11 scripts/batch_test.py --cleanup   # writes output_files/* and an aggregated template
+python3.11 scripts/diff_truth.py             # produces output_files/_REPORT.md
+
 # Legacy CLI (in legacy/ directory)
 python legacy/convert_word_to_pdf.py --input-dir ./docs --output-dir ./pdf
 python legacy/format_with_template.py --template t.docx --content c.docx
@@ -56,7 +62,31 @@ Content  .docx  ──► content_parser.parse_content()       ──► list[di
                                 └──► renderer.render_document()     ──► output .docx (template styles applied, images embedded)
 ```
 
-Each stage is independently callable. The pipeline is used by both the single-file endpoint (`/api/typeset/single/download`) and the batch processor (`batch_service.py`).
+When processing a single file or a batch, the same `TemplateConfig` is
+also passed to `template_service.build_style_brief()` and the resulting
+one-line-per-type text is injected into the AI prompt. The brief
+describes the **target output style** (font/size/alignment/indent); it
+is not a classification rule. The brief is also accepted via the new
+`POST /api/templates/batch-upload` endpoint which aggregates all
+uploaded templates by majority vote per style property.
+
+### Batch Template Learning (template_service.aggregate_templates)
+
+Accepts N `TemplateConfig`s, returns a single "consensus" config:
+
+- Per `ParagraphType`, every style property (font, size, bold, color,
+  alignment, indent, line_spacing, spacing) is taken by majority vote
+  across the input configs. Ties resolve to the earliest seen value;
+  `None` entries are excluded from voting.
+- Page settings (margins, page size) are merged per dimension.
+- Block rules resolve to the strictest variant (`required` >
+  `optional` > `skip`).
+- The result is persisted to `data/templates/agg_<timestamp>/` so it
+  is selectable like any other template.
+
+This is the "let the model learn" mechanism: by aggregating several
+template examples, the renderer is steered toward a robust style and
+the AI gets a richer target-style brief.
 
 ### Template Analysis (template_service.py)
 
@@ -91,7 +121,17 @@ examples; format metadata (font, size, bold, color, alignment, indent) is
 serialized alongside the text. JSON is requested via
 `response_format: {type: json_object}`, with markdown-fence and
 trailing-comma cleanup in the parser. Post-processing enforces only the
-`main_title` invariant.
+`main_title` invariant. The DeepSeek client timeout is 180s and
+`max_tokens=8192` to fit documents with ~125 paragraphs.
+
+**Known limitation** (see `output_files/_REPORT.md` from a test run):
+the same content classified twice can produce different type
+distributions because `temperature=0.1` allows tie-breaking noise and
+the model over-classifies unformatted Chinese paragraphs as
+`section_header`. The aggregated style brief helps the *renderer* use
+the correct output style but does not constrain the *classifier*;
+fixing this needs a more constrained prompt or per-type confidence
+thresholds.
 
 All types and confidence levels in `app/schemas/models.py`
 (`ParagraphType` enum — 17 types, `ConfidenceLevel` — high/medium/low).

@@ -25,7 +25,6 @@ from app.schemas.models import (
     TemplateListItem,
 )
 from app.utils.word_utils import (
-    emu_to_pt,
     get_paragraph_format_info,
     get_run_font_info,
     is_affiliation_text,
@@ -449,6 +448,144 @@ def analyze_template(doc: Document, name: str = "") -> TemplateConfig:
     }
 
     return config
+
+
+# ── Cross-Template Aggregation (batch learning) ────────────
+
+def _majority(values: list, skip_none: bool = True):
+    """Return the most common value in `values`; ties broken by first occurrence.
+
+    If `skip_none` is True, None entries are excluded from voting.
+    Returns None if the list is empty (or all-None with skip_none).
+    """
+    pool = [v for v in values if not (skip_none and v is None)]
+    if not pool:
+        return None
+    counts: dict = {}
+    first_seen: dict = {}
+    for i, v in enumerate(pool):
+        if v not in counts:
+            counts[v] = 0
+            first_seen[v] = i
+        counts[v] += 1
+    # Sort by (-count, first_seen) so ties resolve to the earliest seen value.
+    return min(pool, key=lambda k: (-counts[k], first_seen[k]))
+
+
+def _aggregate_page_settings(settings_list: list[PageSettings]) -> PageSettings:
+    """Merge page settings across templates by majority vote per dimension."""
+    if not settings_list:
+        return PageSettings()
+    return PageSettings(
+        width_emu=_majority([s.width_emu for s in settings_list]),
+        height_emu=_majority([s.height_emu for s in settings_list]),
+        top_margin_emu=_majority([s.top_margin_emu for s in settings_list]),
+        bottom_margin_emu=_majority([s.bottom_margin_emu for s in settings_list]),
+        left_margin_emu=_majority([s.left_margin_emu for s in settings_list]),
+        right_margin_emu=_majority([s.right_margin_emu for s in settings_list]),
+    )
+
+
+def aggregate_templates(configs: list[TemplateConfig]) -> TemplateConfig:
+    """Merge multiple TemplateConfigs into one "consensus" config.
+
+    For each ParagraphType, every style property (font, size, bold, color,
+    alignment, indent, line_spacing, spacing) is taken by majority vote
+    across the input configs. This lets a batch of template examples
+    produce a more robust target style than any single template.
+    """
+    if not configs:
+        raise ValueError("aggregate_templates requires at least one config")
+
+    # Union of all paragraph-type keys seen across templates.
+    all_keys: set[str] = set()
+    for cfg in configs:
+        all_keys.update(cfg.styles.keys())
+
+    merged_styles: dict[str, StyleProfile] = {}
+    for key in sorted(all_keys):
+        profiles = [c.styles[key] for c in configs if key in c.styles]
+        if not profiles:
+            continue
+        merged_styles[key] = StyleProfile(
+            font_name=_majority([p.font_name for p in profiles]),
+            font_size_pt=_majority([p.font_size_pt for p in profiles]),
+            font_size_emu=_majority([p.font_size_emu for p in profiles]),
+            font_bold=_majority([p.font_bold for p in profiles]),
+            font_italic=_majority([p.font_italic for p in profiles]),
+            font_color=_majority([p.font_color for p in profiles]),
+            line_spacing=_majority([p.line_spacing for p in profiles]) or 1.5,
+            space_before_pt=_majority([p.space_before_pt for p in profiles]),
+            space_after_pt=_majority([p.space_after_pt for p in profiles]),
+            first_line_indent_emu=_majority(
+                [p.first_line_indent_emu for p in profiles]
+            ),
+            alignment=_majority([p.alignment for p in profiles]),
+        )
+
+    page = _aggregate_page_settings([c.page_settings for c in configs])
+
+    # Block rules: take the strictest (required > optional > skip) per type.
+    rule_rank = {BlockRule.required: 2, BlockRule.optional: 1, BlockRule.skip: 0}
+    all_rule_keys: set[str] = set()
+    for cfg in configs:
+        all_rule_keys.update(cfg.block_rules.keys())
+    merged_rules: dict[str, BlockRule] = {}
+    for key in sorted(all_rule_keys):
+        rules = [c.block_rules[key] for c in configs if key in c.block_rules]
+        if not rules:
+            continue
+        merged_rules[key] = max(rules, key=lambda r: rule_rank.get(r, 0))
+
+    return TemplateConfig(
+        template_id=f"agg_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+        template_name=f"aggregated-{len(configs)}",
+        page_settings=page,
+        styles=merged_styles,
+        block_rules=merged_rules,
+    )
+
+
+def build_style_brief(config: TemplateConfig) -> str:
+    """Build a one-line-per-style description for the AI prompt.
+
+    The brief is a compact text representation of the **target output
+    style** for each paragraph type. It is passed to the AI so the model
+    knows what the *output* should look like; it is NOT a classification
+    rule. Colors are deliberately omitted — including them biases the
+    model into misclassifying paragraphs whose input color doesn't match
+    the brief, even though the colors describe the target style only.
+    """
+    lines = [
+        "[Target output style brief — derived from the template batch.",
+        " These describe how the final document will be rendered, NOT",
+        " how to classify input paragraphs. Use them only to break ties",
+        " between similar-looking types.]"
+    ]
+    # Stable order matches the enum definition in schemas/models.py.
+    canonical_order = [
+        "main_title", "article_title", "section_header", "body_text",
+        "author_name", "author_note", "source", "publish_date", "edition",
+        "editor_note", "affiliation", "tag_label", "image", "image_caption",
+        "footer", "other",
+    ]
+    for key in canonical_order:
+        profile = config.styles.get(key)
+        if not profile:
+            continue
+        parts = [key]
+        if profile.font_name:
+            parts.append(profile.font_name)
+        if profile.font_size_pt:
+            parts.append(f"{profile.font_size_pt:g}pt")
+        if profile.font_bold:
+            parts.append("粗体")
+        if profile.alignment:
+            parts.append(profile.alignment.split()[0])
+        if profile.first_line_indent_emu:
+            parts.append(f"缩进≈{profile.first_line_indent_emu // 12700}pt")
+        lines.append("- " + " · ".join(parts))
+    return "\n".join(lines)
 
 
 # ── Helpers ───────────────────────────────────────────────

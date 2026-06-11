@@ -22,9 +22,9 @@ word-auto-typeset/
 │   │   ├── typeset.py                # 单文件/批量套版 API
 │   │   └── convert.py                # Word → PDF 转换 API
 │   ├── services/
-│   │   ├── template_service.py       # 模板分析引擎（评分制样式提取）
+│   │   ├── template_service.py       # 模板分析引擎（评分制样式提取）+ 跨模板聚合
 │   │   ├── content_parser.py         # 内容解析（段落、图片、表格）
-│   │   ├── ai_recognizer.py          # AI 结构识别（纯 LLM 路线）
+│   │   ├── ai_recognizer.py          # AI 结构识别（纯 LLM 路线，接收 style_brief）
 │   │   ├── renderer.py               # Word 渲染引擎（样式套用 + 图片嵌入）
 │   │   └── batch_service.py          # 批量任务调度
 │   ├── schemas/
@@ -32,6 +32,9 @@ word-auto-typeset/
 │   └── utils/
 │       ├── word_utils.py             # Word 工具函数
 │       └── file_utils.py             # 文件处理工具
+├── scripts/                          # 批量学习测试 / 真值对比脚本
+│   ├── batch_test.py                 # 从目录学模板 → 处理输入 → 输出 + 对照
+│   └── diff_truth.py                 # 跑 AI 在 truth / output 上，生成 _REPORT.md
 ├── frontend/                         # Vue3 + Element Plus + Vite
 │   └── src/views/
 │       ├── TemplateManage.vue        # 模板管理
@@ -41,6 +44,25 @@ word-auto-typeset/
 ├── legacy/                           # 原始脚本（保留兼容）
 ├── requirements.txt
 └── start.sh                          # 一键启动脚本
+```
+
+## 批量学习（多模板聚合）
+
+上传多个 .docx 模板，系统会按多数投票合并成一份「共识」模板（存到
+`data/templates/agg_<时间戳>/`），分类时把目标样式描述（brief）注入
+AI prompt，渲染时使用聚合后的样式。`block_rules` 取最严的（required >
+optional > skip）。
+
+```bash
+# 命令行批量学习 + 端到端测试
+python3.11 scripts/batch_test.py --cleanup     # 跑完保留 agg_ 模板
+python3.11 scripts/diff_truth.py               # 生成 _REPORT.md 对照报告
+```
+
+也可以通过 API：
+```
+POST /api/templates/batch-upload   (multipart files[])
+→ {uploaded: [...], failed: [...], aggregated: TemplateConfig}
 ```
 
 ## 快速开始
@@ -89,6 +111,7 @@ cd frontend && npm run dev
 |------|------|------|
 | GET | `/` | 列出所有模板 |
 | POST | `/upload` | 上传并分析模板 |
+| POST | `/batch-upload` | 批量上传多个模板，返回各自 ID + 多数投票聚合后的 TemplateConfig |
 | PUT | `/{id}/replace` | 替换模板文件 |
 | DELETE | `/{id}` | 删除模板 |
 | GET | `/{id}/config` | 查看模板配置 |

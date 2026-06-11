@@ -22,6 +22,7 @@ from app.services.ai_recognizer import recognize_structure
 from app.services.renderer import render_document
 from app.services.template_service import (
     _docx_path,
+    build_style_brief,
     get_template,
     list_templates,
 )
@@ -61,7 +62,8 @@ async def typeset_single_download(
         if not paragraphs:
             raise HTTPException(status_code=400, detail="内容文档为空")
 
-        content_doc = recognize_structure(paragraphs, file.filename)
+        style_brief = build_style_brief(template)
+        content_doc = recognize_structure(paragraphs, file.filename, style_brief=style_brief)
 
         output_path = root / f"{stem}_排版后.docx"
         template_docx = _docx_path(template_id)

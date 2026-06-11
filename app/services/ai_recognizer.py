@@ -36,6 +36,7 @@ from app.utils.word_utils import (
 def recognize_structure(
     paragraphs: list[dict[str, Any]],
     filename: str = "",
+    style_brief: str = "",
 ) -> ContentDocument:
     """
     Recognize the structure of a parsed document via the cloud LLM.
@@ -44,6 +45,15 @@ def recognize_structure(
     Pure-AI mode: classification is delegated entirely to the configured
     OpenAI-compatible API. Rule-based fallback has been removed; failures
     propagate to the caller so the operator can act on them.
+
+    Args:
+        paragraphs: parsed paragraph dicts from `content_parser.parse_content`.
+        filename: original filename, for diagnostics.
+        style_brief: optional one-line-per-style description produced by
+            `template_service.build_style_brief()`. When present it is
+            injected into the AI prompt so the model classifies against
+            the *target* style of the template batch, not just the format
+            hints in the content.
 
     Raises:
         RuntimeError: when AI recognition is not configured, or the API call fails.
@@ -55,7 +65,7 @@ def recognize_structure(
         )
 
     doc = ContentDocument(original_filename=filename)
-    classified = _ai_classify(paragraphs)  # let exceptions propagate
+    classified = _ai_classify(paragraphs, style_brief=style_brief)
 
     # Post-process: ensure structural invariants
     content_paragraphs = _post_process(classified)
@@ -110,7 +120,10 @@ def _describe_format(hints: dict) -> str:
     return f"【格式：{', '.join(parts)}】" if parts else ""
 
 
-def _ai_classify(paragraphs: list[dict[str, Any]]) -> list[ContentParagraph]:
+def _ai_classify(
+    paragraphs: list[dict[str, Any]],
+    style_brief: str = "",
+) -> list[ContentParagraph]:
     """
     Use a cloud LLM (DeepSeek / OpenAI-compatible) to classify paragraphs.
 
@@ -118,6 +131,9 @@ def _ai_classify(paragraphs: list[dict[str, Any]]) -> list[ContentParagraph]:
     - Passes format metadata (bold, color, alignment, font, size) alongside text
     - Uses few-shot examples in the system prompt so the model learns
       the mapping from (text + format) → paragraph type
+    - Optionally appends a target-style brief derived from the template
+      batch (see `template_service.build_style_brief`) so the model
+      classifies against the *target* style, not just the input format
     - Handles JSON parsing edge cases (markdown fences, trailing commas)
     """
     import urllib.request
@@ -190,7 +206,8 @@ def _ai_classify(paragraphs: list[dict[str, Any]]) -> list[ContentParagraph]:
 返回JSON: {{"classifications": [{{"index": 0, "type": "main_title", "confidence": "high"}}]}}
 confidence: high/medium/low。只返回JSON。"""
 
-    user_prompt = f"请分析以下文档段落：\n\n{text_block}"
+    brief_section = f"\n\n{style_brief}\n" if style_brief else ""
+    user_prompt = f"请分析以下文档段落：\n\n{text_block}{brief_section}"
 
     payload = json.dumps({
         "model": AI_MODEL,
@@ -199,7 +216,7 @@ confidence: high/medium/low。只返回JSON。"""
             {"role": "user", "content": user_prompt},
         ],
         "temperature": 0.1,
-        "max_tokens": 4096,
+        "max_tokens": 8192,
         "response_format": {"type": "json_object"},
     }).encode("utf-8")
 
@@ -212,7 +229,7 @@ confidence: high/medium/low。只返回JSON。"""
     req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
 
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=180) as resp:
             response = json.loads(resp.read().decode("utf-8"))
         content = response["choices"][0]["message"]["content"]
         ai_result = _parse_ai_json(content)

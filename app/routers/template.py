@@ -13,6 +13,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from app.config import TEMPLATES_DIR
 from app.schemas.models import APIResponse, TemplateConfig, TemplateListItem
 from app.services.template_service import (
+    aggregate_templates,
     analyze_template,
     delete_template,
     get_template,
@@ -78,6 +79,72 @@ async def upload_template(file: UploadFile = File(...)):
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"模板分析失败: {e}")
+
+
+@router.post("/batch-upload", response_model=APIResponse)
+async def batch_upload_templates(files: list[UploadFile] = File(...)):
+    """
+    Upload multiple template Word documents at once.
+
+    Each file is analyzed independently with `analyze_template()` and saved
+    as its own template. The response lists the new template IDs and a
+    convenience aggregated config (majority vote across all uploaded
+    templates) that can be used directly for typesetting.
+    """
+    if not files:
+        raise HTTPException(status_code=400, detail="请至少上传一个模板文件")
+
+    saved: list[dict] = []
+    configs: list[TemplateConfig] = []
+    errors: list[dict] = []
+
+    for f in files:
+        if not f.filename:
+            errors.append({"filename": "", "error": "文件名为空"})
+            continue
+        try:
+            content = await f.read()
+            config = save_template(content, f.filename)
+            configs.append(config)
+            saved.append({
+                "filename": f.filename,
+                "template_id": config.template_id,
+                "template_name": config.template_name,
+            })
+        except Exception as e:
+            errors.append({"filename": f.filename, "error": str(e)})
+
+    aggregated = None
+    if configs:
+        try:
+            agg = aggregate_templates(configs)
+            # Persist the aggregated config so it's selectable like any
+            # regular template.
+            tdir = TEMPLATES_DIR / agg.template_id
+            tdir.mkdir(parents=True, exist_ok=True)
+            (tdir / "template_config.json").write_text(
+                agg.model_dump_json(indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            aggregated = agg.model_dump()
+        except Exception as e:
+            errors.append({"filename": "(aggregate)", "error": str(e)})
+
+    if not saved and errors:
+        raise HTTPException(
+            status_code=400,
+            detail=f"所有模板上传失败: {errors[0]['error']}",
+        )
+
+    return APIResponse(
+        success=True,
+        message=f"批量上传完成：{len(saved)} 成功，{len(errors)} 失败",
+        data={
+            "uploaded": saved,
+            "failed": errors,
+            "aggregated": aggregated,
+        },
+    )
 
 
 @router.put("/{template_id}/replace", response_model=APIResponse)
