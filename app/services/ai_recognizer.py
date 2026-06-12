@@ -215,7 +215,7 @@ confidence: high/medium/low。只返回JSON。"""
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        "temperature": 0.1,
+        "temperature": 0.0,
         "max_tokens": 8192,
         "response_format": {"type": "json_object"},
     }).encode("utf-8")
@@ -232,9 +232,52 @@ confidence: high/medium/low。只返回JSON。"""
         with urllib.request.urlopen(req, timeout=180) as resp:
             response = json.loads(resp.read().decode("utf-8"))
         content = response["choices"][0]["message"]["content"]
-        ai_result = _parse_ai_json(content)
     except Exception as e:
-        raise RuntimeError(f"AI classification failed: {e}")
+        raise RuntimeError(f"AI classification request failed: {e}")
+
+    # Try parse; if it fails, retry once with a strict "return only JSON" hint.
+    # The DeepSeek API occasionally returns truncated or malformed JSON for
+    # large documents; a single retry usually fixes it.
+    for attempt in range(2):
+        try:
+            ai_result = _parse_ai_json(content)
+            break
+        except Exception as e:
+            if attempt == 1:
+                # Give up. Surface a useful diagnostic — last 200 chars
+                # of the raw response so the operator can see where it
+                # went wrong.
+                snippet = content[-200:] if len(content) > 200 else content
+                raise RuntimeError(
+                    f"AI classification JSON parse failed: {e}. "
+                    f"response_len={len(content)}, tail={snippet!r}"
+                )
+            retry_payload = json.dumps({
+                "model": AI_MODEL,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                    {"role": "assistant", "content": content},
+                    {"role": "user", "content":
+                        "Your previous response was not valid JSON. "
+                        "Return ONLY a valid JSON object matching the schema, "
+                        "no prose, no markdown fences."},
+                ],
+                "temperature": 0.0,
+                "max_tokens": 8192,
+                "response_format": {"type": "json_object"},
+            }).encode("utf-8")
+            retry_req = urllib.request.Request(
+                url, data=retry_payload, headers=headers, method="POST",
+            )
+            try:
+                with urllib.request.urlopen(retry_req, timeout=180) as resp:
+                    response = json.loads(resp.read().decode("utf-8"))
+                content = response["choices"][0]["message"]["content"]
+            except Exception as inner:
+                raise RuntimeError(
+                    f"AI classification JSON retry failed: {inner}"
+                )
 
     # ── Map AI results to ContentParagraph objects ──
     classified_map: dict[int, tuple[str, str]] = {}
@@ -293,16 +336,48 @@ def _parse_ai_json(content: str) -> dict:
 
 # ── Post-Processing ───────────────────────────────────────
 
+# Heuristic for demoting AI-misclassified heading-like paragraphs back
+# to body_text. Empirically the LLM over-classifies long plain Chinese
+# paragraphs as section_header even when the input format gives no
+# signal. A paragraph that is:
+#   - long (>120 chars), AND
+#   - not bold across all runs, AND
+#   - not centered
+# is almost certainly body text, not a heading. The "downgrade if long
+# and plain" rule is purely post-hoc and does not require any rule-based
+# classifier.
+_LONG_PLAIN_CHARS = 120
+
+
+def _is_paragraph_plain(cp: ContentParagraph) -> bool:
+    """True if the paragraph has no heading-like formatting signals."""
+    if not cp.runs:
+        return True
+    for run in cp.runs:
+        if run.get("bold"):
+            return False
+    for run in cp.runs:
+        align = run.get("alignment")
+        if align and "CENTER" in str(align).upper():
+            return False
+    return True
+
+
 def _post_process(paragraphs: list[ContentParagraph]) -> list[ContentParagraph]:
     """
     Post-process AI-classified paragraphs.
 
     Pure-AI mode: classification is the LLM's responsibility. This function
-    only enforces structural invariants the model is allowed to violate
-    (e.g. every document must have a main_title).
+    enforces structural invariants the model is allowed to violate and
+    applies a few low-risk sanity rules:
+
+    1. Every document must have a main_title (promote the first plausible
+       paragraph if the model produced none).
+    2. Long, unbolded, non-centered paragraphs labeled as section_header,
+       article_title, or tag_label are demoted to body_text — the LLM
+       otherwise over-classifies plain Chinese text as headings.
     """
-    # Ensure at least one main_title exists; promote the first plausible
-    # paragraph if the model produced none.
+    # 1. Ensure main_title exists.
     has_main_title = any(cp.para_type == ParagraphType.main_title for cp in paragraphs)
     if not has_main_title:
         for cp in paragraphs:
@@ -310,6 +385,28 @@ def _post_process(paragraphs: list[ContentParagraph]) -> list[ContentParagraph]:
                 cp.para_type = ParagraphType.main_title
                 cp.confidence = ConfidenceLevel.medium
                 break
+
+    # 2. Demote over-classified headings back to body_text.
+    heading_types = {
+        ParagraphType.section_header,
+        ParagraphType.article_title,
+        ParagraphType.tag_label,
+    }
+    demoted = 0
+    for cp in paragraphs:
+        if cp.para_type not in heading_types:
+            continue
+        if cp.has_image:
+            continue
+        text = cp.text or ""
+        if len(text) <= _LONG_PLAIN_CHARS:
+            continue
+        if not _is_paragraph_plain(cp):
+            continue
+        cp.para_type = ParagraphType.body_text
+        demoted += 1
+        if cp.confidence == ConfidenceLevel.high:
+            cp.confidence = ConfidenceLevel.medium
 
     return paragraphs
 
